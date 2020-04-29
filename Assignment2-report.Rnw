@@ -1,0 +1,428 @@
+\documentclass{article}
+
+\title{\vspace{-3cm}PM: Foundations HA 2}
+\author{Agafonov Nikolai, Kurennoi Ilia, \\*
+Panko Aliaksandr, Yakimchyk Nadzeya }
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage[a4paper,margin=2cm, tmargin=3cm]{geometry}
+\usepackage{graphicx}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+\maketitle
+
+<<echo=FALSE>>=
+library("quantmod")
+options(scipen = 999)
+download_data = function(){
+  
+  data1 = read.csv(choose.files())
+  data2 = read.csv(choose.files())
+  
+  # Delete x column
+  data1 = data1[,-1]
+  data2 = data2[,-1]
+  
+  # Date format
+  data2$date = as.Date(data2$date)
+  
+  # Restrict the time series to the period from Nov 2006 to Oct 2018
+  data2 = data2[data2$date >= "2006-11-30" & data2$date <= "2018-10-31",]
+  
+  data_list = list("data1" = data1, "data2" = data2)
+  
+  return(data_list)
+}
+
+
+calculate_excess_log_return = function(data_list){
+  
+  data1 = data_list$data1
+  data2 = data_list$data2
+  
+  # Create xts object
+  dates = data2$date
+  data2 = data2[,-1]
+  data2_xts = xts(data2, order.by = dates)
+  
+  # Calculate log returns
+  for (i in 1:ncol(data2)){
+    data2_xts[,i] = dailyReturn(data2_xts[,i], type = "log" )
+  }
+  
+  # Delete the first row
+  data2_xts = data2_xts[-1,]
+  
+  # Delete TBill return
+  TBill_log_return_xts = data2_xts[,ncol(data2_xts)]
+  log_return_xts = data2_xts[,-ncol(data2_xts)]
+  
+  # Calculate excess log returns
+  excess_log_return_xts = log_return_xts
+  for (i in 1:ncol(log_return_xts)){
+    excess_log_return_xts[,i] = log_return_xts[,i] - TBill_log_return_xts 
+  }
+  
+  return(excess_log_return_xts)
+}
+
+
+calculate_summary_statistics = function(data_list, excess_log_return_xts, risky_asset_names){
+  
+  data1 = data_list$data1
+  data2 = data_list$data2
+  
+  basic_statistics = data.frame(matrix(NA, nrow = length(risky_asset_names), ncol = 2))
+  rownames(basic_statistics) = risky_asset_names
+  basic_statistics_colnames = c("Market Weight", "Annualized St Dev Of Excess Returns")
+  colnames(basic_statistics) = basic_statistics_colnames
+  
+  # Calculate Market Weight
+  total_mcap = sum(data1$mcap[1:9])
+  for (i in 1:nrow(basic_statistics)){
+    basic_statistics$`Market Weight`[i] = data1$mcap[i] / total_mcap
+  }
+  
+  # Calculate Annualized Standard Deviation Of Excess Returns
+  for (i in 1:nrow(basic_statistics)){
+    basic_statistics$`Annualized St Dev Of Excess Returns`[i] = sd(excess_log_return_xts[,i]) * sqrt(12)
+  }
+  
+  # Round
+  basic_statistics_rounded = basic_statistics
+  colnames(basic_statistics_rounded) = paste(basic_statistics_colnames, ", %" , sep = "")
+  basic_statistics_rounded = round(basic_statistics_rounded * 100, 2)
+  
+  # Correlation matrix of the risky asset classes excess returns
+  excess_log_returns_cor = cor(excess_log_return_xts)
+  excess_log_returns_cor_rounded = round(excess_log_returns_cor, 2)
+  
+  # Covariance matrix of the risky asset classes excess returns
+  excess_log_returns_cov = cov(excess_log_return_xts) * 12
+  excess_log_returns_cov_rounded = round(excess_log_returns_cov * 1000, 1)
+  
+  summary_statistics_list = list("basic_statistics_rounded" = basic_statistics_rounded,
+                                 "excess_log_returns_cor_rounded" = excess_log_returns_cor_rounded,
+                                 "excess_log_returns_cov_rounded" = excess_log_returns_cov_rounded,
+                                 "SIGMA" = excess_log_returns_cov,
+                                 "market_weights" = basic_statistics$`Market Weight`)
+  
+  return(summary_statistics_list)
+}
+
+
+# Calculate posterior excess returns and posterior weights for a single view
+calculate_posterior_single_view = function(tau, SIGMA, OMEGA, P, PI_0, V, A){
+  
+  if(OMEGA == 0){
+    posterior_excess_returns = PI_0 + tau * SIGMA %*% t(P) %*% solve(tau*P%*%SIGMA%*%t(P))%*%(V - P%*%PI_0)
+  }
+  else{
+    posterior_excess_returns = solve(solve(tau*SIGMA) + (1/OMEGA)*t(P)%*%P) %*% (solve(tau*SIGMA)%*%PI_0 +(1/OMEGA)*V*t(P))
+  }
+  
+  posterior_weights = (1/A) * solve(SIGMA) %*% posterior_excess_returns
+  
+  posterior_list = list("posterior_excess_returns" = posterior_excess_returns, "posterior_weights" = posterior_weights)
+  
+  return(posterior_list)
+}
+
+
+# Calculate posterior excess returns and posterior weights for multiple views
+calculate_posterior_multiple_views = function(tau, SIGMA, OMEGA, P, PI_0, V, A){
+  
+  posterior_excess_returns = solve(solve(tau*SIGMA) + t(P)%*%solve(OMEGA)%*%P) %*% (solve(tau*SIGMA)%*%PI_0 +t(P)%*%solve(OMEGA)%*%V)
+
+  posterior_weights = (1/A) * solve(SIGMA) %*% posterior_excess_returns
+  
+  posterior_list = list("posterior_excess_returns" = posterior_excess_returns, "posterior_weights" = posterior_weights)
+  
+  return(posterior_list)
+}
+
+
+calculate_equilibrium_excess_returns_and_markowitz_weights =  function(A, SIGMA, market_weights){
+  
+  # Calculate equilibrium excess returns
+  PI_0 = A * SIGMA %*%  market_weights
+  PI_0_rounded = round(PI_0 * 100, 2)
+  colnames(PI_0_rounded) = "Equilibrium Excess Return, %"
+  
+  # Create a vector of excess returns PI_1 which is like PI_0 but replaces the equilibrium excess return
+  # for International Bonds (i.e., Bonds ex U.S.) with an absolute view of 0.5% p.a.
+  PI_1 = PI_0
+  PI_1[1] = 0.005
+  PI_1_rounded = round(PI_1 * 100, 2)
+  colnames(PI_1_rounded) = "Excess Return, %"
+  
+  # Solve for resulting portfolio weights using the Markowitz optimization
+  markowitz_weights = (1/A) * solve(SIGMA) %*% PI_1
+  markowitz_weights_rounded = round(markowitz_weights*100,2)
+  colnames(markowitz_weights_rounded) = "Markowitz Optimization Weights, %"
+  
+  equilibrium_list = list("PI_0" = PI_0,
+                          "PI_0_rounded" = PI_0_rounded,
+                          "PI_1_rounded" = PI_1_rounded,
+                          "markowitz_weights_rounded" = markowitz_weights_rounded)
+  
+  return(equilibrium_list)
+}
+
+
+# Create a dataframe with priors and posteriors for different OMEGA and the same tau in task 3
+create_absolute_view_prior_posterior_df = function(tau, SIGMA, P, PI_0, V, A, market_weights, risky_asset_names){
+  
+  # (3a) your return view is certain
+  OMEGA_3a = 0
+  posterior_list_3a = calculate_posterior_single_view(tau, SIGMA, OMEGA_3a, P, PI_0, V, A)
+
+  # (3b) the variance of the view goes to infinity
+  OMEGA_3b = Inf
+  posterior_list_3b = calculate_posterior_single_view(tau, SIGMA, OMEGA_3b, P, PI_0, V, A)
+
+  # (3c) the view is believed to lie with 95% certainty in the interval from -0.5% to +1.5%
+  OMEGA_3c = (0.01 / qnorm(1.95/2))^2
+  posterior_list_3c = calculate_posterior_single_view(tau, SIGMA, OMEGA_3c, P, PI_0, V, A)
+
+  # Create df
+  prior_posterior_df = data.frame(matrix(NA, nrow = length(risky_asset_names), ncol = 8))
+  rownames(prior_posterior_df) = risky_asset_names
+  colnames(prior_posterior_df) = c("Prior excess_returns, %",
+                                   "Prior weights, %",
+                                   "Posterior excess returns(OMEGA = 0), %",
+                                   "Posterior weights(OMEGA = 0), %",
+                                   "Posterior excess returns(OMEGA = Inf), %",
+                                   "Posterior weights(OMEGA = Inf), %",
+                                   "Posterior excess returns(OMEGA = 0.000026), %",
+                                   "Posterior weights(OMEGA = 0.000026), %")
+  
+  prior_posterior_df[,1] = PI_0
+  prior_posterior_df[,2] = market_weights
+  prior_posterior_df[,3] = posterior_list_3a$posterior_excess_returns
+  prior_posterior_df[,4] = posterior_list_3a$posterior_weights
+  prior_posterior_df[,5] = posterior_list_3b$posterior_excess_returns
+  prior_posterior_df[,6] = posterior_list_3b$posterior_weights
+  prior_posterior_df[,7] = posterior_list_3c$posterior_excess_returns
+  prior_posterior_df[,8] = posterior_list_3c$posterior_weights
+  
+  prior_posterior_df = round(prior_posterior_df*100,2)
+  
+  return(prior_posterior_df)
+}
+
+
+# Provide a table contrasting the prior to the posterior returns and weights in task 4
+create_relative_view_prior_posterior_df = function(tau, SIGMA, OMEGA, P, PI_0, V, A, market_weights, risky_asset_names){
+  
+  posterior_list = calculate_posterior_single_view(tau, SIGMA, OMEGA, P, PI_0, V, A)
+  relative_view_prior_posterior_df = data.frame(matrix(NA, nrow = length(risky_asset_names), ncol = 4))
+  rownames(relative_view_prior_posterior_df) = risky_asset_names
+  colnames(relative_view_prior_posterior_df) = c("Prior excess_returns, %",
+                                                "Prior weights, %",
+                                                "Posterior excess returns(OMEGA = 0.000083), %",
+                                                "Posterior weights(OMEGA = 0.000083), %")
+  relative_view_prior_posterior_df[,1] = PI_0
+  relative_view_prior_posterior_df[,2] = market_weights
+  relative_view_prior_posterior_df[,3] = posterior_list$posterior_excess_returns
+  relative_view_prior_posterior_df[,4] = posterior_list$posterior_weights
+  
+  relative_view_prior_posterior_df = round(relative_view_prior_posterior_df*100,2)
+  
+  return(relative_view_prior_posterior_df)
+}
+
+
+# Provide a table contrasting the prior to the posterior returns and weights in task 5
+create_multiple_views_prior_posterior_df = function(tau, SIGMA, OMEGA, P, PI_0, V, A, market_weights, risky_asset_names){
+  
+  posterior_list = calculate_posterior_multiple_views(tau, SIGMA, OMEGA, P, PI_0, V, A)
+  multiple_views_prior_posterior_df = data.frame(matrix(NA, nrow = length(risky_asset_names), ncol = 4))
+  rownames(multiple_views_prior_posterior_df) = risky_asset_names
+  colnames(multiple_views_prior_posterior_df) = c("Prior excess_returns, %",
+                                                  "Prior weights, %",
+                                                  "Posterior excess returns, %",
+                                                  "Posterior weights, %")
+  multiple_views_prior_posterior_df[,1] = PI_0
+  multiple_views_prior_posterior_df[,2] = market_weights
+  multiple_views_prior_posterior_df[,3] = posterior_list$posterior_excess_returns
+  multiple_views_prior_posterior_df[,4] = posterior_list$posterior_weights
+  
+  multiple_views_prior_posterior_df = round(multiple_views_prior_posterior_df*100,2)
+  
+  return(multiple_views_prior_posterior_df)
+}
+
+
+@
+
+
+\section*{Task 1: Summary Statistics}
+<<echo=FALSE>>=
+# Download data
+data_list = download_data()
+
+
+# Calculate excess log return
+excess_log_return_xts = calculate_excess_log_return(data_list)
+
+# Task 1: Summary Statistics
+risky_asset_names = colnames(excess_log_return_xts)
+summary_statistics_list = calculate_summary_statistics(data_list, excess_log_return_xts, risky_asset_names)
+basic_statistics_rounded = summary_statistics_list$basic_statistics_rounded
+excess_log_returns_cor_rounded = summary_statistics_list$excess_log_returns_cor_rounded
+excess_log_returns_cov_rounded = summary_statistics_list$excess_log_returns_cov_rounded
+SIGMA = summary_statistics_list$SIGMA
+market_weights = summary_statistics_list$market_weights
+@
+As required by the task, we provide the market weight of the indices and the standard deviation of excess logreturns (annualized).
+<<echo=FALSE>>=
+basic_statistics_rounded
+@
+As expected, the standard deviations of bonds returns are lower than those of stocks, so the risk in investing in bonds is generally lower than that in stocks. Among bonds the US bonds (Bonds.US) have the lowest standard deviation (so their risk, as expected, is the lowest) and high yield bonds (Bonds.HY) have the highest one. Among stocks US large stocks (Stocks.USLG, Stocks.USLV) have the lowest standard deviation and emerging markets stocks (Stocks.EM) (again, as expected) - the hightest.
+
+
+Correlation matrix of the risky asset classes excess returns:
+<<echo=FALSE>>=
+excess_log_returns_cor_rounded
+@
+Covariance matrix of the risky asset classes excess returns:
+<<echo=FALSE>>=
+excess_log_returns_cov_rounded
+@
+
+\section*{Task 2: Equilibrium returns and Markowitz optimization}
+<<echo=FALSE>>=
+# Task 2: Equilibrium returns and Markowitz optimization
+A = 3
+equilibrium_list = calculate_equilibrium_excess_returns_and_markowitz_weights(A, SIGMA, market_weights)
+
+PI_0 = equilibrium_list$PI_0
+PI_0_rounded = equilibrium_list$PI_0_rounded
+PI_1_rounded = equilibrium_list$PI_1_rounded
+markowitz_weights_rounded = equilibrium_list$markowitz_weights_rounded
+
+@
+Equilibrium excess returns $\Pi$:
+<<echo=FALSE>>=
+PI_0_rounded
+@
+Equilibrium excess returns of the examined indices correspond to their risk shown above. Not surprizingly, the US bonds have the lowest expected excess return and the largest equilibrium excess return is provided by the emerging markets stocks.\\
+
+The same vector, where the equilibrium excess return for International Bonds (i.e., Bonds ex U.S.) is replaced with an absolute view of 0.5\% p.a.:
+<<echo=FALSE>>=
+PI_1_rounded
+@
+The weights obtained by Markowitz optimization:
+<<echo=FALSE>>=
+markowitz_weights_rounded
+@
+As we can see, Markowitz optimization offers considerable short positions, which are hardly implemetable in practice.
+
+\section*{Task 3 - Black-Litterman - absolute view}
+
+<<echo=FALSE>>=
+tau0 = 0.01
+tau1 = 0.00001
+tau2 = 10
+OMEGA_3c = (0.01 / qnorm(1.95/2))^2
+
+P_1 = t(c(1,0,0,0,0,0,0,0,0))
+V_1 = 0.005
+@
+
+In this task:\\
+$P\_1$ = (1,0,0,0,0,0,0,0,0);\\
+$V\_1$ = (0.005);\\
+OMEGA\_3a = 0;\\
+OMEGA\_3b = Inf;\\
+OMEGA\_3c = 0.000026\\
+
+The results of BL procedure with $\tau = 0.01$:
+<<echo=FALSE>>=
+tau0_prior_posterior_df = create_absolute_view_prior_posterior_df(tau0, SIGMA, P_1, PI_0, V_1, A, market_weights, risky_asset_names)
+tau0_prior_posterior_df
+@
+As expected, with the certain view the posterior return of Bonds.exUS is exactly the same as the view. The returns of other assets are adjusted because of the correlation. The most considerable adjustments are demonstrated by Bonds.US, Stocks.DMexUS and Stocks.EM, which have the highest correlation with Bonds.exUS. Bonds.HY also has large correlation with Bonds.exUS, but for some reasons does not demonstrate considerable adjustment comparing the other indices correlated with Bonds.exUS. Regarding the weights only the weight of Bonds.exUS is changed, but it changes very considerably and becomes negative, from 26.66\% to -29.27\%. \\ \\
+Quite obviously, when the variance of the view goes to infinity, posterior returns and weigths are equal to prior ones. \\ \\
+When there is some uncertainty of the view, but a finite one, the posterior of Bonds.exUS becomes 0.81\%, which is between 0.5\% (the view) and 1.57\% (the prior). The pattern of adjustment of returns is the same as in the case of certain views. The most considerable adjustments are demonstrated by Bonds.US, Stocks.DMexUS and Stocks.EM, which have the highest correlation with Bonds.exUS. Bonds.HY also has large correlation with Bonds.exUS, but for some reasons does not demonstrate considerable adjustment comparing the other indices correlated with Bonds.exUS. Again, the weight of Bonds.exUS is the only one which changed, but it again changes very considerably and becomes negative (although not that negative as in case of certain view), from 26.66\% to -13.04\%. \\ \\
+Let's examine whether the posterior returns and weights are affected by changes in $\tau$. Let's choose $\tau = 0.00001$, smaller than our basic $\tau = 0.01$, and $\tau = 10$, larger than our basic $\tau = 0.01$. \\ \\
+The differences between BL procedure with $\tau = 0.00001$ and our basic $\tau = 0.01$:
+<<echo=FALSE>>=
+tau1_prior_posterior_df = create_absolute_view_prior_posterior_df(tau1, SIGMA, P_1, PI_0, V_1, A, market_weights, risky_asset_names)
+delta_tau0_tau1_df = tau1_prior_posterior_df - tau0_prior_posterior_df
+delta_tau0_tau1_df
+@
+As we can see, there is no differences in extreme cases (certain view and totally uncertain view), as expected from the idea of BL model. But with some finite uncertainty the posterior excess returns of all indices increase, while the weight of Bonds.exUS is 26.52\% - quite close to the prior one (so the difference is +39.56 percentage points). \\ \\
+The differences between BL procedure with $\tau = 10$ and our basic $\tau = 0.01$: 
+<<echo=FALSE>>=
+tau2_prior_posterior_df = create_absolute_view_prior_posterior_df(tau2, SIGMA, P_1, PI_0, V_1, A, market_weights, risky_asset_names)
+delta_tau0_tau2_df = tau2_prior_posterior_df - tau0_prior_posterior_df
+delta_tau0_tau2_df
+@
+
+
+Again, as we can see, there is no differences in extreme cases (certain view and totally uncertain view), as expected from the idea of BL model. But with some finite uncertainty the posterior excess returns of all indices decrease, while the weight of Bonds.exUS is -29.25\% - quite far away from prior and very close to that in case of certain view with $\tau = 0.01$ (so the difference is -16.21 percentage points).
+
+\section*{Task 4 - Black-Litterman - relative view}
+In this task:\\
+$P\_2$ = (0,0,0,1,0,0,0,-0.71,-0.29);\\
+$V\_2$ = (0.01);\\
+OMEGA\_4 = 0.000083;\\
+\newline
+The results of BL procedure with $\tau = 0.01$:
+<<echo=FALSE>>=
+data1 = data_list$data1
+Stocks.DMexUS_weighted_average_weight = data1$mcap[8] / (data1$mcap[8] + data1$mcap[9])
+Stocks.EM_weighted_average_weight = data1$mcap[9] / (data1$mcap[8] + data1$mcap[9])
+
+P_2 = t(c(0,0,0,1,0,0,0,-Stocks.DMexUS_weighted_average_weight,-Stocks.EM_weighted_average_weight))
+V_2 = 0.01
+OMEGA_4 = (0.015 / qnorm(1.9/2))^2
+relative_view_prior_posterior_df = create_relative_view_prior_posterior_df(tau0, SIGMA, OMEGA_4, P_2, PI_0, V_2, A, market_weights, risky_asset_names)
+relative_view_prior_posterior_df
+@
+In equilibrium difference between US
+Large Growth and the capital weighted average of International Developed and Emerging Equity excess returns was -1.5\%. In posterior excess returns this difference became equal to - 0.2\%. This result reflects the shift towards the view. The returns of other assets are adjusted because of the correlation. \\
+\newline
+The posterior weight of US Large Growth equals to 58.19\% compared to the prior weight of 9.88\%.
+The posterior weights of International Developed and Emerging Equity are negative. The posterior weights of other assets are  equal to their prior weights.
+
+\section*{Task 5 - Black-Litterman - relative view}
+In this task:\\
+\newline
+$P\_3 = \left[ \begin{matrix}
+1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 1 & 0 & 0 & 0 & -0,71 & -0,29 
+\end{matrix}  \right]$\\
+\newline
+
+$V\_3 = (0.005, 0.01)^t$\\
+\newline
+
+OMEGA\_5 = $\left[ \begin{matrix}
+0.000026 & 0 \\
+0 & 0.000083 
+\end{matrix}  \right]$\\
+\newline
+The results of BL procedure with $\tau = 0.01$:
+<<echo=FALSE>>=
+OMEGA_5 = diag(c(OMEGA_3c, OMEGA_4),2,2)
+P_3 = rbind(P_1,P_2)
+V_3 = c(V_1,V_2)
+multiple_views_prior_posterior_df = create_multiple_views_prior_posterior_df(tau0, SIGMA, OMEGA_5, P_3, PI_0, V_3, A, market_weights, risky_asset_names)
+multiple_views_prior_posterior_df
+@
+The posterior excess return on International Bonds is lower than the prior one reflecting the shift towards the first view. \\
+\newline
+In equilibrium difference between US
+Large Growth and the capital weighted average of International Developed and Emerging Equity excess returns was -1.5\%. In posterior excess returns this difference became equal to - 0.1\%. This result reflects the shift towards the second view. The returns of other assets are adjusted because of the correlation. \\
+\newline
+The posterior weight of International Bonds is lower than the prior one.
+The posterior weight of US Large Growth has increased compared to the prior weight.
+The posterior weights of International Developed and Emerging Equity are negative. The posterior weights of other assets are  equal to their prior weights.
+\end{document}
